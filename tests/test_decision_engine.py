@@ -234,3 +234,46 @@ class TestRoutingDecision:
         profile = make_profile(sensitivity=Sensitivity.CONFIDENTIAL)
         decision = await engine.decide(profile)
         assert decision.estimated_cost == 0.0
+
+
+class TestMaxTierCapRouting:
+    """
+    Regression coverage for MAX_MODEL_TIER: primary tier selection and the
+    fallback chain are two independent call sites into the registry
+    (_select_model and _build_fallback_chain both call by_tier() on their
+    own), so capping needs verifying against both, not just one.
+    """
+
+    @pytest.fixture
+    def capped_registry(self):
+        with patch(
+            "src.inference.providers.ollama_provider.OllamaClient"
+        ), patch(
+            "src.inference.providers.openrouter_provider.OpenRouterClient"
+        ):
+            from src.inference.provider_registry import ProviderRegistry
+            return ProviderRegistry(max_tier="standard")
+
+    @pytest.fixture
+    def capped_engine(self, capped_registry):
+        return DecisionEngine(registry=capped_registry, budget_tracker=None)
+
+    async def test_high_complexity_never_selects_premium_when_capped(
+        self, capped_engine, capped_registry
+    ):
+        profile = make_profile(complexity=Complexity.HIGH)  # would normally go premium
+        decision = await capped_engine.decide(profile)
+        provider = capped_registry.get(decision.selected_model)
+        assert provider is not None
+        assert provider.info.tier != "premium"
+
+    async def test_fallback_chain_never_includes_premium_when_capped(
+        self, capped_engine, capped_registry
+    ):
+        profile = make_profile(complexity=Complexity.HIGH)
+        decision = await capped_engine.decide(profile)
+        assert len(decision.fallback_chain) > 0
+        for alias in decision.fallback_chain:
+            provider = capped_registry.get(alias)
+            assert provider is not None
+            assert provider.info.tier != "premium"

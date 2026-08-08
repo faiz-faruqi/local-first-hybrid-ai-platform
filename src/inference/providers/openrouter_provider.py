@@ -11,6 +11,8 @@ vendor. One OpenRouterClient per model_id gives us GPT-4o, Claude, Gemini,
 and Llama through a single, consistent API surface.
 """
 
+from collections.abc import AsyncGenerator
+
 from src.config.models import ModelDefinition
 from src.inference.base_provider import Provider
 from src.inference.openrouter_client import OpenRouterClient
@@ -34,6 +36,10 @@ class OpenRouterProvider(Provider):
 
     async def complete(self, prompt: str) -> str:
         return await self._client.complete(prompt)
+
+    async def stream_complete(self, prompt: str) -> AsyncGenerator[str, None]:
+        async for chunk in self._client.stream_complete(prompt):
+            yield chunk
 
     async def health_check(self) -> bool:
         """

@@ -9,7 +9,7 @@ import type {
   RoutingDecision,
   SourceDocument,
 } from "@/lib/api";
-import { getHealth, getModels, queryDocuments } from "@/lib/api";
+import { getHealth, getModels, queryDocuments, streamQuery } from "@/lib/api";
 import ResponseMeta from "./ResponseMeta";
 import SourceDocs from "./SourceDocs";
 
@@ -25,6 +25,9 @@ export interface Message {
   classification?: QueryProfile | null;
   routingDecision?: RoutingDecision | null;
   error?: boolean;
+  // Set when a stream fails mid-flight — unlike `error`, this doesn't
+  // replace already-streamed partial content, it annotates alongside it.
+  streamError?: string;
 }
 
 interface ChatPanelProps {
@@ -32,6 +35,8 @@ interface ChatPanelProps {
   onLoading: (loading: boolean) => void;
   onReset?: () => void;
 }
+
+const DEPARTMENTS = ["IT", "Sales", "Marketing", "Finance"];
 
 const SAMPLE_QUERIES = [
   "What are the termination conditions in the vendor contracts?",
@@ -45,9 +50,11 @@ export default function ChatPanel({ onResponse, onLoading, onReset }: ChatPanelP
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [forceCloud, setForceCloud] = useState(false);
+  const [streamingEnabled, setStreamingEnabled] = useState(false);
   const [demoMode, setDemoMode] = useState<boolean | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [selectedModel, setSelectedModel] = useState<string>("");
+  const [selectedDepartment, setSelectedDepartment] = useState<string>("");
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -77,6 +84,7 @@ export default function ChatPanel({ onResponse, onLoading, onReset }: ChatPanelP
     setInput("");
     setForceCloud(false);
     setSelectedModel("");
+    setSelectedDepartment("");
     onResponse(null);
     onLoading(false);
     onReset?.();
@@ -102,12 +110,62 @@ export default function ChatPanel({ onResponse, onLoading, onReset }: ChatPanelP
     onLoading(true);
     onResponse(null);
 
+    if (streamingEnabled) {
+      const assistantId = crypto.randomUUID();
+      setMessages((prev) => [...prev, { id: assistantId, role: "assistant", content: "" }]);
+
+      await streamQuery(
+        {
+          query: trimmed,
+          top_k: 5,
+          force_cloud: forceCloud,
+          model: selectedModel || undefined,
+          department: selectedDepartment || undefined,
+        },
+        (delta) => {
+          setMessages((prev) =>
+            prev.map((m) => (m.id === assistantId ? { ...m, content: m.content + delta } : m))
+          );
+        },
+        (done) => {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantId
+                ? {
+                    ...m,
+                    provider: done.provider,
+                    cached: done.cached,
+                    latencyMs: done.latency_ms,
+                    sources: done.sources,
+                    modelAlias: done.model_alias,
+                    classification: done.classification,
+                    routingDecision: done.routing_decision,
+                  }
+                : m
+            )
+          );
+          onResponse(done.provider);
+        },
+        (message) => {
+          setMessages((prev) =>
+            prev.map((m) => (m.id === assistantId ? { ...m, streamError: message } : m))
+          );
+          onResponse(null);
+        }
+      );
+
+      setLoading(false);
+      onLoading(false);
+      return;
+    }
+
     try {
       const result: QueryResponse = await queryDocuments({
         query: trimmed,
         top_k: 5,
         force_cloud: forceCloud,
         model: selectedModel || undefined,
+        department: selectedDepartment || undefined,
       });
 
       const assistantMsg: Message = {
@@ -215,6 +273,11 @@ export default function ChatPanel({ onResponse, onLoading, onReset }: ChatPanelP
                 >
                   {msg.content}
                 </div>
+                {msg.streamError && (
+                  <p className="mt-1 text-xs" style={{ color: "var(--coral)" }}>
+                    ⚠ {msg.streamError}
+                  </p>
+                )}
                 {msg.provider && !msg.error && (
                   <>
                     <ResponseMeta
@@ -233,7 +296,7 @@ export default function ChatPanel({ onResponse, onLoading, onReset }: ChatPanelP
           </div>
         ))}
 
-        {loading && (
+        {loading && !streamingEnabled && (
           <div className="flex justify-start">
             <div
               className="rounded-2xl rounded-tl-md px-4 py-3 border"
@@ -288,6 +351,33 @@ export default function ChatPanel({ onResponse, onLoading, onReset }: ChatPanelP
             </div>
           )}
 
+          {/* Department selector — self-reported, for usage-attribution demo
+              purposes only. No real RBAC backs this; it's a labeling
+              attribute that shows up on the /dashboard distribution chart. */}
+          <div className="flex items-center gap-2">
+            <span className="font-mono text-xs" style={{ color: "var(--ink-4)" }}>
+              department:
+            </span>
+            <select
+              value={selectedDepartment}
+              onChange={(e) => setSelectedDepartment(e.target.value)}
+              disabled={loading}
+              className="font-mono text-xs px-2 py-1 rounded-lg border transition-colors disabled:opacity-40"
+              style={{
+                borderColor: "var(--rule)",
+                background: "var(--paper)",
+                color: "var(--ink-2)",
+              }}
+            >
+              <option value="">unspecified</option>
+              {DEPARTMENTS.map((d) => (
+                <option key={d} value={d}>
+                  {d}
+                </option>
+              ))}
+            </select>
+          </div>
+
           {/* Force cloud toggle — only meaningful in production mode.
               In demo mode the router already sends every request to
               OpenRouter (skips Ollama), so the toggle is a no-op and
@@ -313,6 +403,25 @@ export default function ChatPanel({ onResponse, onLoading, onReset }: ChatPanelP
               </span>
             </div>
           )}
+
+          {/* Streaming toggle — renders the answer token-by-token via SSE
+              instead of waiting for the full completion. */}
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setStreamingEnabled((v) => !v)}
+              className="flex items-center gap-2 font-mono text-xs transition-colors"
+              style={{ color: streamingEnabled ? "var(--accent)" : "var(--ink-4)" }}
+            >
+              <span
+                className="inline-block w-3 h-3 rounded border-2 transition-colors"
+                style={{
+                  borderColor: streamingEnabled ? "var(--accent)" : "var(--rule)",
+                  background: streamingEnabled ? "var(--accent)" : "transparent",
+                }}
+              />
+              Stream response
+            </button>
+          </div>
         </div>
 
         {/* Text area + send */}

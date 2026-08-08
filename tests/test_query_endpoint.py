@@ -10,6 +10,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from fastapi import HTTPException
+
 from src.api.main import app
 from src.api.dependencies import (
     get_cache,
@@ -17,6 +19,8 @@ from src.api.dependencies import (
     get_decision_engine,
     get_embedder,
     get_inference_router,
+    get_rate_limiter,
+    get_trace_store,
     get_vector_store_dep,
 )
 from src.inference.router import ProviderResult
@@ -68,6 +72,30 @@ def mock_cache():
 
 
 @pytest.fixture
+def mock_trace_store():
+    """
+    Mocked TraceStore — without this override, the endpoint constructs a
+    real TraceStore(ResponseCache()) that tries to reach an actual Redis
+    instance and eats the 2s socket-connect timeout on every request.
+    """
+    m = AsyncMock()
+    m.write_trace = AsyncMock()
+    return m
+
+
+@pytest.fixture
+def mock_rate_limiter():
+    """
+    Mocked RateLimiter — without this override, the endpoint constructs a
+    real RateLimiter(ResponseCache()) that tries to reach an actual Redis
+    instance and eats the 2s socket-connect timeout on every request.
+    """
+    m = AsyncMock()
+    m.check = AsyncMock(return_value=None)
+    return m
+
+
+@pytest.fixture
 def mock_registry():
     """A real registry with mocked underlying clients."""
     with patch(
@@ -108,7 +136,7 @@ def mock_decision_engine(mock_registry):
 @pytest.fixture
 def client(
     mock_embedder, mock_store, mock_cache, mock_router,
-    mock_classifier, mock_decision_engine,
+    mock_classifier, mock_decision_engine, mock_trace_store, mock_rate_limiter,
 ):
     """TestClient with all dependencies overridden."""
     app.dependency_overrides[get_embedder] = lambda: mock_embedder
@@ -117,13 +145,15 @@ def client(
     app.dependency_overrides[get_inference_router] = lambda: mock_router
     app.dependency_overrides[get_classifier] = lambda: mock_classifier
     app.dependency_overrides[get_decision_engine] = lambda: mock_decision_engine
+    app.dependency_overrides[get_trace_store] = lambda: mock_trace_store
+    app.dependency_overrides[get_rate_limiter] = lambda: mock_rate_limiter
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()
 
 
 class TestQueryEndpoint:
-    def test_query_returns_200_with_local_provider(self, client, mock_cache, mock_ollama):
+    def test_query_returns_200_with_local_provider(self, client, mock_cache, mock_ollama, mock_trace_store):
         import os
         mock_cache.get.return_value = None  # cache miss
         response = client.post(
@@ -139,8 +169,15 @@ class TestQueryEndpoint:
         assert len(data["sources"]) == 1
         assert "latency_ms" in data
         assert isinstance(data["answer"], str)
+        # Cache-miss path should produce exactly one trace with routing metadata.
+        mock_trace_store.write_trace.assert_called_once()
+        record = mock_trace_store.write_trace.call_args[0][0]
+        assert record["cached"] is False
+        assert record["routing_mode"] == "automatic"
+        assert record["classification"] is not None
+        assert record["routing_decision"] is not None
 
-    def test_query_returns_cached_response(self, client, mock_cache):
+    def test_query_returns_cached_response(self, client, mock_cache, mock_trace_store):
         mock_cache.get.return_value = "This is a cached answer."
         response = client.post(
             "/query/",
@@ -151,6 +188,11 @@ class TestQueryEndpoint:
         assert data["provider"] == "cache"
         assert data["cached"] is True
         assert data["answer"] == "This is a cached answer."
+        # Cache-hit path is still traced, just without a routing decision.
+        mock_trace_store.write_trace.assert_called_once()
+        record = mock_trace_store.write_trace.call_args[0][0]
+        assert record["cached"] is True
+        assert record["provider"] == "cache"
 
     def test_query_force_cloud_routes_to_cloud(self, client, mock_cache, mock_ollama, mock_openrouter):
         mock_cache.get.return_value = None
@@ -165,7 +207,7 @@ class TestQueryEndpoint:
 
     def test_query_returns_404_when_no_docs(
         self, mock_embedder, mock_cache, mock_router,
-        mock_classifier, mock_decision_engine,
+        mock_classifier, mock_decision_engine, mock_trace_store, mock_rate_limiter,
     ):
         """When RAG is needed and vector search returns empty results, endpoint returns 404."""
         empty_store = AsyncMock()
@@ -176,15 +218,21 @@ class TestQueryEndpoint:
         app.dependency_overrides[get_inference_router] = lambda: mock_router
         app.dependency_overrides[get_classifier] = lambda: mock_classifier
         app.dependency_overrides[get_decision_engine] = lambda: mock_decision_engine
+        app.dependency_overrides[get_trace_store] = lambda: mock_trace_store
+        app.dependency_overrides[get_rate_limiter] = lambda: mock_rate_limiter
         with TestClient(app) as c:
             # Use a query that triggers rag_needed=True (contains 'contracts')
             response = c.post("/query/", json={"query": "Which contracts have termination clauses?"})
         app.dependency_overrides.clear()
         assert response.status_code == 404
+        # A 404 is still a traced outcome, not a gap in the trace record.
+        mock_trace_store.write_trace.assert_called_once()
+        record = mock_trace_store.write_trace.call_args[0][0]
+        assert record["error"] is not None
 
     def test_query_bypasses_rag_for_general_knowledge(
         self, mock_embedder, mock_cache, mock_router,
-        mock_classifier, mock_decision_engine, mock_store,
+        mock_classifier, mock_decision_engine, mock_store, mock_trace_store, mock_rate_limiter,
     ):
         """When rag_needed=False, the endpoint should not call the vector store."""
         mock_cache.get.return_value = None
@@ -194,6 +242,8 @@ class TestQueryEndpoint:
         app.dependency_overrides[get_inference_router] = lambda: mock_router
         app.dependency_overrides[get_classifier] = lambda: mock_classifier
         app.dependency_overrides[get_decision_engine] = lambda: mock_decision_engine
+        app.dependency_overrides[get_trace_store] = lambda: mock_trace_store
+        app.dependency_overrides[get_rate_limiter] = lambda: mock_rate_limiter
         with TestClient(app) as c:
             # 'What is machine learning' has no RAG-trigger keywords
             response = c.post("/query/", json={"query": "What is machine learning?"})
@@ -266,6 +316,19 @@ class TestQueryEndpoint:
         assert response.status_code == 200
         data = response.json()
         assert data["model_alias"] == "gpt-4o"
+
+    def test_query_returns_429_when_rate_limited(self, client, mock_rate_limiter):
+        """
+        Proves the rate-limit dependency is actually wired onto the route —
+        RateLimiter's own unit tests (test_rate_limit.py) only prove it's
+        correct in isolation, not that the endpoint calls it.
+        """
+        mock_rate_limiter.check = AsyncMock(
+            side_effect=HTTPException(status_code=429, detail="Rate limit exceeded: max 5 requests/minute.")
+        )
+        response = client.post("/query/", json={"query": "What are the termination conditions?"})
+        assert response.status_code == 429
+        assert "detail" in response.json()
 
     def test_models_endpoint(self, client):
         """Phase 1: GET /models should return the model catalog."""

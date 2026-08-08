@@ -102,7 +102,7 @@ export default function SignIn() {
             </span>
           </div>
           <p className="text-[11px]" style={{ color: "var(--ink-3)" }}>
-            Access code:{" "}
+            Access code (time-limited):{" "}
             <a
               href="https://linkedin.com/in/faizfaruqi"
               target="_blank"

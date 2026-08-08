@@ -23,6 +23,11 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - BUDGET_DAILY_USD=${BUDGET_DAILY_USD:-0}
       - BUDGET_MONTHLY_USD=${BUDGET_MONTHLY_USD:-0}
+      - MAX_MODEL_TIER=${MAX_MODEL_TIER:-premium}
+      - RATE_LIMIT_PER_MINUTE=${RATE_LIMIT_PER_MINUTE:-5}
+      - RATE_LIMIT_PER_DAY=${RATE_LIMIT_PER_DAY:-30}
+      - ADMIN_KEY=${ADMIN_KEY}
+      - ACCESS_CODE_DEFAULT_TTL_HOURS=${ACCESS_CODE_DEFAULT_TTL_HOURS:-168}
     depends_on:
       qdrant:
         condition: service_healthy

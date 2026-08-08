@@ -5,8 +5,10 @@ Wraps the Ollama REST API for on-premises LLM inference.
 Configured via OLLAMA_BASE_URL and OLLAMA_MODEL environment variables.
 """
 
+import json
 import logging
 import os
+from collections.abc import AsyncGenerator
 
 import httpx
 
@@ -50,6 +52,34 @@ class OllamaClient:
             response.raise_for_status()
             data = response.json()
             return data["response"]
+
+    async def stream_complete(self, prompt: str) -> AsyncGenerator[str, None]:
+        """
+        Stream a prompt completion from Ollama as it's generated.
+
+        Ollama's /api/generate returns newline-delimited JSON objects when
+        stream=True, each carrying an incremental `response` fragment and
+        a final object with `done: true`.
+        """
+        payload = {
+            "model": self._model,
+            "prompt": prompt,
+            "stream": True,
+        }
+
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            async with client.stream(
+                "POST", f"{self._base_url}/api/generate", json=payload
+            ) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if not line.strip():
+                        continue
+                    data = json.loads(line)
+                    if data.get("response"):
+                        yield data["response"]
+                    if data.get("done"):
+                        break
 
     async def health_check(self) -> bool:
         """Return True if the Ollama node is reachable."""

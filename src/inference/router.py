@@ -18,6 +18,7 @@ working without modification.
 
 import logging
 import os
+from collections.abc import AsyncGenerator
 from enum import Enum
 
 from src.inference.base_provider import Provider
@@ -124,3 +125,99 @@ class InferenceRouter:
         else:
             response = await provider.complete(prompt)
         return response, ProviderResult.CLOUD, model_alias
+
+    # ── Streaming: legacy local-first path (mirrors `complete()`) ────────────
+    async def stream_complete(
+        self,
+        prompt: str,
+        force_cloud: bool = False,
+    ) -> AsyncGenerator[str, None]:
+        """Streaming counterpart to `complete()`. See its docstring for fallback semantics."""
+        if not force_cloud and not DEMO_MODE:
+            gen = self._ollama.stream_complete(prompt)
+            try:
+                first_chunk = await gen.__anext__()
+            except StopAsyncIteration:
+                return
+            except Exception as exc:
+                logger.warning(
+                    "Local inference failed — falling back to cloud. Reason: %s", exc,
+                )
+                async for chunk in self._openrouter.stream_complete(prompt):
+                    yield chunk
+                return
+            yield first_chunk
+            async for chunk in gen:
+                yield chunk
+            return
+
+        async for chunk in self._openrouter.stream_complete(prompt):
+            yield chunk
+
+    # ── Streaming: explicit model selection via registry ─────────────────────
+    async def stream_complete_with_model(
+        self,
+        prompt: str,
+        model_alias: str,
+        provider_result: dict | None = None,
+    ) -> AsyncGenerator[str, None]:
+        """
+        Stream a completion using a specific model from the registry.
+
+        Fallback works only up to the first chunk: a local model's connection
+        failure typically surfaces on the very first `__anext__()` call (before
+        any bytes have reached the caller), so that case falls back to cloud
+        exactly like `complete_with_model`. Once a chunk has already been
+        yielded to the caller — and therefore already streamed to the client —
+        a later failure can no longer be retried; it propagates as-is and the
+        route handler turns it into a terminal SSE error event instead.
+
+        Since a generator can't also `return` a tuple, which provider actually
+        served the request (relevant when a local model falls back to cloud
+        mid-call) is reported via the optional `provider_result` out-param dict
+        (`provider_result["provider"] = ProviderResult.LOCAL | .CLOUD`), set
+        before the first chunk is yielded — mirrors what `complete_with_model`
+        returns directly.
+        """
+        if self._registry is None:
+            raise RuntimeError("ProviderRegistry not configured for this router.")
+
+        provider = self._registry.get(model_alias)
+        if provider is None:
+            raise ValueError(f"Unknown model alias: '{model_alias}'.")
+
+        if provider.is_local and not DEMO_MODE:
+            gen = provider.stream_complete(prompt)
+            try:
+                first_chunk = await gen.__anext__()
+            except StopAsyncIteration:
+                if provider_result is not None:
+                    provider_result["provider"] = ProviderResult.LOCAL
+                return
+            except Exception as exc:
+                logger.warning(
+                    "Local streaming model '%s' failed before first chunk — "
+                    "falling back to cloud. Reason: %s",
+                    model_alias, exc,
+                )
+                if provider_result is not None:
+                    provider_result["provider"] = ProviderResult.CLOUD
+                async for chunk in self._openrouter.stream_complete(prompt):
+                    yield chunk
+                return
+            if provider_result is not None:
+                provider_result["provider"] = ProviderResult.LOCAL
+            yield first_chunk
+            async for chunk in gen:
+                yield chunk
+            return
+
+        # Cloud model (or DEMO_MODE) — stream directly, no fallback path.
+        if provider_result is not None:
+            provider_result["provider"] = ProviderResult.CLOUD
+        if provider.is_local and DEMO_MODE:
+            async for chunk in self._openrouter.stream_complete(prompt):
+                yield chunk
+        else:
+            async for chunk in provider.stream_complete(prompt):
+                yield chunk

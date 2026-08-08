@@ -22,11 +22,14 @@ Usage in a router:
 import logging
 from functools import lru_cache
 
+from src.api.access_code import AccessCodeStore
+from src.api.rate_limit import RateLimiter
 from src.cache.redis_cache import ResponseCache
 from src.inference.ollama_client import OllamaClient
 from src.inference.openrouter_client import OpenRouterClient
 from src.inference.provider_registry import ProviderRegistry
 from src.inference.router import InferenceRouter
+from src.observability.trace_store import TraceStore
 from src.retrieval.embedder import Embedder
 from src.retrieval.vector_store_factory import VectorStoreType, get_vector_store
 from src.routing.budget import BudgetTracker
@@ -104,6 +107,44 @@ def get_budget_tracker() -> BudgetTracker:
     """
     logger.info("Initialising BudgetTracker singleton.")
     return BudgetTracker(get_cache())
+
+
+@lru_cache(maxsize=1)
+def get_trace_store() -> TraceStore:
+    """
+    Singleton trace store (observability).
+
+    Reuses the existing Redis connection from the response cache — same
+    reuse pattern as BudgetTracker — under a separate key namespace.
+    """
+    logger.info("Initialising TraceStore singleton.")
+    return TraceStore(get_cache())
+
+
+@lru_cache(maxsize=1)
+def get_rate_limiter() -> RateLimiter:
+    """
+    Singleton per-IP rate limiter (public demo cost guard).
+
+    Reuses the existing Redis connection from the response cache — same
+    reuse pattern as BudgetTracker/TraceStore — under a separate key
+    namespace.
+    """
+    logger.info("Initialising RateLimiter singleton.")
+    return RateLimiter(get_cache())
+
+
+@lru_cache(maxsize=1)
+def get_access_code_store() -> AccessCodeStore:
+    """
+    Singleton demo access-code store.
+
+    Reuses the existing Redis connection from the response cache — same
+    reuse pattern as BudgetTracker/RateLimiter/TraceStore — under a
+    separate key namespace.
+    """
+    logger.info("Initialising AccessCodeStore singleton.")
+    return AccessCodeStore(get_cache())
 
 
 @lru_cache(maxsize=1)

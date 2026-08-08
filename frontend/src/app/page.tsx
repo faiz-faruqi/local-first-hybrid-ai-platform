@@ -81,62 +81,86 @@ export default function DemoPage() {
               </em>
             </h1>
           </div>
-          <div className="flex items-center gap-2 flex-wrap">
-            {[
-              "FastAPI",
-              "Qdrant / pgvector",
-              "Redis",
-              "OpenRouter",
-              "RAG",
-            ].map((tag) => (
-              <span
-                key={tag}
-                className="font-mono text-xs px-3 py-1 rounded-full border"
+          <div className="flex items-center gap-3 flex-wrap">
+            {/* Tech stack — static labels describing the architecture */}
+            <div className="flex items-center gap-2 flex-wrap">
+              {[
+                "FastAPI",
+                "Qdrant / pgvector",
+                "Redis",
+                "OpenRouter",
+                "RAG",
+              ].map((tag) => (
+                <span
+                  key={tag}
+                  className="font-mono text-xs px-3 py-1 rounded-full border"
+                  style={{
+                    borderColor: "var(--rule)",
+                    background: "var(--rule-light)",
+                    color: "var(--ink-3)",
+                  }}
+                >
+                  {tag}
+                </span>
+              ))}
+            </div>
+
+            {/* Divider between static labels and live/session controls */}
+            <span
+              className="hidden sm:inline-block w-px h-4 flex-shrink-0"
+              style={{ background: "var(--rule)" }}
+            />
+
+            {/* Live links + session controls */}
+            <div className="flex items-center gap-2 flex-wrap">
+              <a
+                href="/dashboard"
+                className="font-mono text-xs px-3 py-1 rounded-full border transition-colors hover:opacity-80"
                 style={{
                   borderColor: "var(--rule)",
                   background: "var(--rule-light)",
                   color: "var(--ink-3)",
                 }}
               >
-                {tag}
-              </span>
-            ))}
-            <a
-              href="https://github.com/faiz-faruqi/local-first-hybrid-ai-platform"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="font-mono text-xs px-3 py-1 rounded-full border transition-colors hover:opacity-80"
-              style={{
-                borderColor: "var(--accent-mid)",
-                background: "var(--accent-light)",
-                color: "var(--accent)",
-              }}
-            >
-              GitHub →
-            </a>
-            {session?.user?.name && (
-              <span
-                className="font-mono text-xs px-3 py-1 rounded-full border"
+                Telemetry →
+              </a>
+              <a
+                href="https://github.com/faiz-faruqi/local-first-hybrid-ai-platform"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="font-mono text-xs px-3 py-1 rounded-full border transition-colors hover:opacity-80"
+                style={{
+                  borderColor: "var(--accent-mid)",
+                  background: "var(--accent-light)",
+                  color: "var(--accent)",
+                }}
+              >
+                GitHub →
+              </a>
+              {session?.user?.name && (
+                <span
+                  className="font-mono text-xs px-3 py-1 rounded-full border"
+                  style={{
+                    borderColor: "var(--rule)",
+                    background: "var(--rule-light)",
+                    color: "var(--ink-3)",
+                  }}
+                >
+                  {session.user.name}
+                </span>
+              )}
+              <button
+                onClick={() => signOut({ callbackUrl: "/auth/signin" })}
+                className="font-mono text-xs px-3 py-1 rounded-full border transition-colors hover:opacity-80"
                 style={{
                   borderColor: "var(--rule)",
-                  background: "var(--rule-light)",
+                  background: "var(--paper)",
                   color: "var(--ink-3)",
                 }}
               >
-                {session.user.name}
-              </span>
-            )}
-            <button
-              onClick={() => signOut({ callbackUrl: "/auth/signin" })}
-              className="font-mono text-xs px-3 py-1 rounded-full border transition-colors hover:opacity-80"
-              style={{
-                borderColor: "var(--rule)",
-                background: "var(--paper)",
-                color: "var(--ink-3)",
-              }}
-            >
-              Sign out
-            </button>
+                Sign out
+              </button>
+            </div>
           </div>
         </div>
       </header>

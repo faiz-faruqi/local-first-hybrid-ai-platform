@@ -15,13 +15,23 @@ registry picks it up automatically.
 """
 
 import logging
+import os
 
 from src.config.models import MODEL_CATALOG, ModelDefinition, list_models
 from src.inference.base_provider import Provider
 from src.inference.providers.ollama_provider import OllamaProvider
 from src.inference.providers.openrouter_provider import OpenRouterProvider
+from src.routing.policies import tier_index
 
 logger = logging.getLogger(__name__)
+
+# Caps which model tiers are visible/routable at all — not just
+# de-prioritized. Default "premium" is unrestricted (every tier is <=
+# premium in TIER_ORDER). Set to e.g. "standard" on a public demo to make
+# premium models (gpt-5, claude-opus) invisible everywhere: GET /models,
+# automatic tier selection, and fallback chains all key off this same
+# registry, so filtering here is the single choke point for all of them.
+MAX_MODEL_TIER = os.getenv("MAX_MODEL_TIER", "premium")
 
 
 class ProviderRegistry:
@@ -38,13 +48,21 @@ class ProviderRegistry:
             ...
     """
 
-    def __init__(self) -> None:
+    def __init__(self, max_tier: str = MAX_MODEL_TIER) -> None:
+        self._max_tier = max_tier
         self._providers: dict[str, Provider] = {}
         self._build()
 
     def _build(self) -> None:
-        """Instantiate a Provider for every entry in the model catalog."""
+        """Instantiate a Provider for every catalog entry at or below max_tier."""
+        max_tier_index = tier_index(self._max_tier)
         for model_def in list_models():
+            if tier_index(model_def.tier) > max_tier_index:
+                logger.info(
+                    "Skipping provider: alias=%s tier=%s (above MAX_MODEL_TIER=%s)",
+                    model_def.alias, model_def.tier, self._max_tier,
+                )
+                continue
             provider = self._make_provider(model_def)
             self._providers[model_def.alias] = provider
             logger.info(

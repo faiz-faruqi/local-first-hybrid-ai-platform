@@ -127,6 +127,54 @@ class TestProviderRegistry:
         assert "cost_per_1k_input" in first
 
 
+class TestMaxModelTierCap:
+    """
+    MAX_MODEL_TIER should make disallowed tiers invisible everywhere the
+    registry is consulted — all(), by_tier(), get(), aliases(), describe()
+    — since callers (decision engine tier selection, fallback chains,
+    explicit model selection, GET /models) each go through different
+    accessors and none of them should leak a capped-out model.
+    """
+
+    @staticmethod
+    def _build(max_tier: str) -> ProviderRegistry:
+        with patch(
+            "src.inference.providers.ollama_provider.OllamaClient"
+        ), patch(
+            "src.inference.providers.openrouter_provider.OpenRouterClient"
+        ):
+            return ProviderRegistry(max_tier=max_tier)
+
+    def test_default_is_unrestricted(self):
+        registry = self._build("premium")
+        assert len(registry.all()) == len(MODEL_CATALOG)
+
+    def test_capping_at_standard_excludes_premium_from_by_tier(self):
+        registry = self._build("standard")
+        assert registry.by_tier("premium") == []
+
+    def test_capping_at_standard_excludes_premium_from_get(self):
+        registry = self._build("standard")
+        assert registry.get("gpt-5") is None
+        assert registry.get("claude-opus") is None
+
+    def test_capping_at_standard_excludes_premium_from_aliases(self):
+        registry = self._build("standard")
+        aliases = registry.aliases()
+        assert "gpt-5" not in aliases
+        assert "claude-opus" not in aliases
+
+    def test_capping_at_standard_excludes_premium_from_describe(self):
+        registry = self._build("standard")
+        assert all(m["tier"] != "premium" for m in registry.describe())
+
+    def test_capping_at_standard_keeps_lower_tiers(self):
+        registry = self._build("standard")
+        remaining_tiers = {p.info.tier for p in registry.all()}
+        assert remaining_tiers == {"local", "cheap", "standard"}
+        assert len(registry.all()) < len(MODEL_CATALOG)
+
+
 # ── Explicit model selection via router ─────────────────────────────────────
 
 
@@ -181,3 +229,105 @@ class TestExplicitModelSelection:
         answer, provider = await router.complete("prompt")
         assert provider == ProviderResult.LOCAL
         assert answer == "Local model answer from Ollama."
+
+
+# ── Streaming: explicit model selection via router ──────────────────────────
+
+
+def make_stream_complete(chunks=None, exc=None):
+    """
+    Build a `stream_complete(prompt)` async-generator function for a fixture
+    provider/client. AsyncMock can't produce an async generator, so tests
+    that need one construct it by hand instead.
+    """
+    async def _stream_complete(prompt):
+        if exc is not None:
+            raise exc
+        for chunk in chunks or []:
+            yield chunk
+    return _stream_complete
+
+
+class TestStreamingModelSelection:
+    @pytest.fixture
+    def registry_with_stream_mocks(self):
+        """Build a registry where every provider's stream_complete() is mocked."""
+        with patch(
+            "src.inference.providers.ollama_provider.OllamaClient"
+        ), patch(
+            "src.inference.providers.openrouter_provider.OpenRouterClient"
+        ):
+            reg = ProviderRegistry()
+            for provider in reg.all():
+                provider.stream_complete = make_stream_complete([f"chunk-from-{provider.alias}"])
+            return reg
+
+    @pytest.fixture
+    def router(self, registry_with_stream_mocks, mock_ollama, mock_openrouter):
+        return InferenceRouter(
+            ollama=mock_ollama,
+            openrouter=mock_openrouter,
+            registry=registry_with_stream_mocks,
+        )
+
+    async def test_cloud_model_streams_directly(self, router):
+        provider_result: dict = {}
+        chunks = [
+            c async for c in router.stream_complete_with_model("prompt", "gpt-4o", provider_result)
+        ]
+        assert chunks == ["chunk-from-gpt-4o"]
+        assert provider_result["provider"] == ProviderResult.CLOUD
+
+    async def test_local_model_streams_directly_when_healthy(self, router):
+        provider_result: dict = {}
+        chunks = [
+            c async for c in router.stream_complete_with_model("prompt", "local-gemma", provider_result)
+        ]
+        assert chunks == ["chunk-from-local-gemma"]
+        assert provider_result["provider"] == ProviderResult.LOCAL
+
+    async def test_local_model_falls_back_to_cloud_before_first_chunk(
+        self, registry_with_stream_mocks, mock_ollama, mock_openrouter,
+    ):
+        """A connection failure on the very first chunk should fall back to cloud transparently."""
+        import httpx
+
+        local_provider = registry_with_stream_mocks.get("local-gemma")
+        local_provider.stream_complete = make_stream_complete(exc=httpx.ConnectError("unreachable"))
+        mock_openrouter.stream_complete = make_stream_complete(["fallback-chunk"])
+        router = InferenceRouter(
+            ollama=mock_ollama, openrouter=mock_openrouter, registry=registry_with_stream_mocks,
+        )
+
+        provider_result: dict = {}
+        chunks = [
+            c async for c in router.stream_complete_with_model("prompt", "local-gemma", provider_result)
+        ]
+
+        assert chunks == ["fallback-chunk"]
+        assert provider_result["provider"] == ProviderResult.CLOUD
+
+    async def test_unknown_model_raises(self, router):
+        with pytest.raises(ValueError, match="Unknown model alias"):
+            async for _ in router.stream_complete_with_model("prompt", "does-not-exist"):
+                pass
+
+    async def test_router_without_registry_raises(self, mock_ollama, mock_openrouter):
+        bare_router = InferenceRouter(
+            ollama=mock_ollama, openrouter=mock_openrouter, registry=None
+        )
+        with pytest.raises(RuntimeError, match="ProviderRegistry not configured"):
+            async for _ in bare_router.stream_complete_with_model("prompt", "gpt-4o"):
+                pass
+
+    async def test_legacy_stream_complete_local_first(self, router, mock_ollama):
+        """Streaming counterpart to the legacy complete() path."""
+        mock_ollama.stream_complete = make_stream_complete(["local-legacy-chunk"])
+        chunks = [c async for c in router.stream_complete("prompt")]
+        assert chunks == ["local-legacy-chunk"]
+
+    async def test_legacy_stream_complete_force_cloud(self, router, mock_ollama, mock_openrouter):
+        mock_openrouter.stream_complete = make_stream_complete(["cloud-legacy-chunk"])
+        chunks = [c async for c in router.stream_complete("prompt", force_cloud=True)]
+        assert chunks == ["cloud-legacy-chunk"]
+        mock_ollama.stream_complete.assert_not_called()

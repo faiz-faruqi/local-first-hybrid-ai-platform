@@ -1,0 +1,57 @@
+# Load-test override — dry-run mode.
+# Adds a stub inference server and redirects the gateway's Ollama/OpenRouter
+# clients at it, so a full production-scale traffic simulation can run
+# against real HTTP, real Redis, and real Qdrant without spending real
+# OpenRouter tokens.
+#
+# Container names are overridden to *-loadtest to avoid colliding with any
+# other ai-* stack that might already be running on the host under a
+# different Compose project (container names are global to the Docker
+# daemon, unlike Compose project scoping).
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.loadtest.yml up -d --build fastapi qdrant redis llm-stub
+
+services:
+
+  llm-stub:
+    build:
+      context: .
+      dockerfile: scripts/loadtest/Dockerfile.stub
+    container_name: ai-llm-stub-loadtest
+    restart: unless-stopped
+    networks:
+      - ai-platform
+
+  fastapi:
+    container_name: ai-fastapi-loadtest
+    environment:
+      - OLLAMA_BASE_URL=http://llm-stub:9999
+      - OPENROUTER_BASE_URL=http://llm-stub:9999
+      - OPENROUTER_API_KEY=dry-run-stub-key
+      - OPENROUTER_MODEL=stub-cloud
+      - DEMO_MODE=false
+      - BUDGET_DAILY_USD=${BUDGET_DAILY_USD:-0}
+      - BUDGET_MONTHLY_USD=${BUDGET_MONTHLY_USD:-0}
+    depends_on:
+      # The base compose file's qdrant healthcheck uses `curl`, which the
+      # qdrant/qdrant:v1.9.2 image doesn't ship — it always reports
+      # unhealthy even though the server is fine. Downgraded to
+      # service_started here so this override isn't blocked by it.
+      qdrant:
+        condition: service_started
+      redis:
+        condition: service_healthy
+      llm-stub:
+        condition: service_started
+
+  # No host ports published for qdrant/redis — the host already has another
+  # stack bound to 6333/6379. fastapi reaches both over the internal
+  # ai-platform network by service name regardless, so nothing is lost.
+  qdrant:
+    container_name: ai-qdrant-loadtest
+    ports: !override []
+
+  redis:
+    container_name: ai-redis-loadtest
+    ports: !override []

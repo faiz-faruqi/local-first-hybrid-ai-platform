@@ -12,6 +12,7 @@ A `Provider` carries:
 """
 
 from abc import ABC, abstractmethod
+from collections.abc import AsyncGenerator
 
 from src.config.models import ModelDefinition
 
@@ -27,6 +28,10 @@ class Provider(ABC):
     @abstractmethod
     async def complete(self, prompt: str) -> str:
         """Generate a completion for the given prompt."""
+
+    @abstractmethod
+    def stream_complete(self, prompt: str) -> AsyncGenerator[str, None]:
+        """Stream a completion for the given prompt, chunk by chunk."""
 
     @abstractmethod
     async def health_check(self) -> bool:

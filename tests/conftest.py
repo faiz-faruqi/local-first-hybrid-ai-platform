@@ -33,10 +33,16 @@ def mock_redis_client():
     """Async mock for aioredis client."""
     m = AsyncMock()
     m.get = AsyncMock(return_value=None)
+    m.set = AsyncMock()
     m.setex = AsyncMock()
     m.keys = AsyncMock(return_value=[])
     m.delete = AsyncMock(return_value=0)
     m.ping = AsyncMock(return_value=True)
+    m.mget = AsyncMock(return_value=[])
+    m.zadd = AsyncMock()
+    m.zremrangebyrank = AsyncMock()
+    m.zrevrange = AsyncMock(return_value=[])
+    m.zrangebyscore = AsyncMock(return_value=[])
     return m
 
 

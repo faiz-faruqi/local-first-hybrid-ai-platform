@@ -47,6 +47,14 @@ class QueryRequest(BaseModel):
             "If omitted, the gateway selects the model automatically (Phase 3)."
         ),
     )
+    department: str | None = Field(
+        default=None,
+        description=(
+            "Self-reported org department (e.g. 'IT', 'Sales', 'Marketing', 'Finance') "
+            "for usage-attribution demo purposes. Not validated against a fixed enum — "
+            "this is a labeling attribute for the telemetry dashboard, not an access-control field."
+        ),
+    )
 
 
 class SourceDocument(BaseModel):

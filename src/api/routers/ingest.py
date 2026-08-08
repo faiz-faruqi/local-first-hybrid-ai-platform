@@ -14,10 +14,10 @@ prevent accidental or unauthorised cache invalidation in production.
 """
 
 import logging
-import os
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 
+from src.api.admin_auth import verify_admin_key
 from src.api.dependencies import get_cache, get_embedder, get_vector_store_dep
 from src.cache.redis_cache import ResponseCache
 from src.models.schemas import IngestRequest, IngestResponse
@@ -27,8 +27,6 @@ from src.retrieval.vector_store_factory import VectorStoreType
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-ADMIN_KEY = os.getenv("ADMIN_KEY", "")
 
 DEFAULT_CHUNK_SIZE = 500
 DEFAULT_CHUNK_OVERLAP = 50
@@ -45,21 +43,6 @@ def _chunk_text(text: str, chunk_size: int = DEFAULT_CHUNK_SIZE, overlap: int = 
             chunks.append(chunk)
         start += chunk_size - overlap
     return chunks
-
-
-def _verify_admin_key(x_admin_key: str = Header(default="")) -> None:
-    """Dependency: verify the X-Admin-Key header for admin endpoints."""
-    if not ADMIN_KEY:
-        # If ADMIN_KEY is not configured, block all admin operations
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Admin key not configured on this deployment.",
-        )
-    if x_admin_key != ADMIN_KEY:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Invalid admin key.",
-        )
 
 
 @router.post("/text", response_model=IngestResponse, status_code=status.HTTP_201_CREATED)
@@ -140,7 +123,7 @@ async def ingest_batch(
     return {"total_chunks_indexed": total, "documents": results}
 
 
-@router.delete("/flush-cache", dependencies=[Depends(_verify_admin_key)])
+@router.delete("/flush-cache", dependencies=[Depends(verify_admin_key)])
 async def flush_cache(
     cache: ResponseCache = Depends(get_cache),
 ) -> dict:

@@ -11,7 +11,7 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from src.api.routers import ingest, models, query
+from src.api.routers import auth, ingest, models, query, telemetry
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "info").upper())
 logger = logging.getLogger(__name__)
@@ -42,6 +42,8 @@ app.add_middleware(
 app.include_router(query.router, prefix="/query", tags=["Query"])
 app.include_router(ingest.router, prefix="/ingest", tags=["Ingest"])
 app.include_router(models.router, prefix="/models", tags=["Models"])
+app.include_router(telemetry.router, prefix="/telemetry", tags=["Telemetry"])
+app.include_router(auth.router, prefix="/auth", tags=["Auth"])
 
 
 @app.get("/health", tags=["System"])
