@@ -205,7 +205,12 @@ export default function ChatPanel({ onResponse, onLoading, onReset }: ChatPanelP
   }
 
   return (
-    <div className="flex flex-col h-full">
+    // min-h-0 is required here: without it, this flex item refuses to
+    // shrink below its content's natural height (default min-height: auto
+    // on a flex child), so once the conversation grows taller than the
+    // available space, the ancestor's overflow-hidden just clips the
+    // excess instead of the messages list below scrolling internally.
+    <div className="flex flex-col h-full min-h-0">
       {/* Toolbar — always visible so a fresh query is one click away */}
       <div className="flex justify-end mb-2">
         <button
